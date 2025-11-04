@@ -4,8 +4,11 @@ TUI (Terminal User Interface) for browsing media duplicates.
 Built with Textual framework for an interactive ncdu-style tree view.
 """
 
+import re
 from collections import defaultdict
 from pathlib import Path
+
+from rich.text import Text
 from textual.app import App, ComposeResult
 from textual.widgets import Tree, Header, Footer, OptionList, Label, Button, Input
 from textual.widgets.tree import TreeNode
@@ -23,8 +26,6 @@ def sort_resolutions(resolutions: set[str]) -> list[str]:
 
     def extract_number(res: str) -> int:
         # Extract numeric part from resolution string (e.g., "1080p" -> 1080)
-        import re
-
         match = re.search(r"(\d+)", res)
         return int(match.group(1)) if match else 0
 
@@ -518,6 +519,25 @@ class MediaDupesApp(App):
                             + format_metadata_summary(1, 0, [metadata])
                         )
 
+    def _get_cursor_node(self) -> TreeNode | None:
+        """Get the current cursor node from the tree, or None if not available."""
+        tree = self.query_one("#duplicates-tree", Tree)
+        return tree.cursor_node
+
+    def _extract_node_identifier(self, node: TreeNode) -> str:
+        """Extract the stable identifier (cyan text) from a node's label."""
+        label_text = node.label
+
+        if isinstance(label_text, Text):
+            # Extract text from cyan or bold cyan spans
+            for span in label_text.spans:
+                style_str = str(span.style) if span.style else ""
+                if "cyan" in style_str:
+                    return label_text.plain[span.start : span.end]
+            # Fallback to full plain text if no cyan span found
+            return label_text.plain
+        return str(label_text)
+
     def _save_expansion_states(self, node: TreeNode, path: str = "") -> None:
         """Recursively save the expansion state of all nodes."""
         if node == node.tree.root:
@@ -530,24 +550,7 @@ class MediaDupesApp(App):
 
         # Build the path for this node using its label
         # Extract only the cyan-colored text part for stable identification
-        from rich.text import Text
-
-        label_text = node.label
-        clean_label = ""
-
-        if isinstance(label_text, Text):
-            # Extract text from cyan or bold cyan spans
-            for span in label_text.spans:
-                style_str = str(span.style) if span.style else ""
-                if "cyan" in style_str:
-                    clean_label = label_text.plain[span.start : span.end]
-                    break
-
-            # Fallback to full plain text if no cyan span found
-            if not clean_label:
-                clean_label = label_text.plain
-        else:
-            clean_label = str(label_text)
+        clean_label = self._extract_node_identifier(node)
 
         # Create hierarchical path
         current_path = f"{path}/{clean_label}" if path else clean_label
@@ -569,24 +572,7 @@ class MediaDupesApp(App):
 
         # Build the path for this node using its label
         # Extract only the cyan-colored text part for stable identification
-        from rich.text import Text
-
-        label_text = node.label
-        clean_label = ""
-
-        if isinstance(label_text, Text):
-            # Extract text from cyan or bold cyan spans
-            for span in label_text.spans:
-                style_str = str(span.style) if span.style else ""
-                if "cyan" in style_str:
-                    clean_label = label_text.plain[span.start : span.end]
-                    break
-
-            # Fallback to full plain text if no cyan span found
-            if not clean_label:
-                clean_label = label_text.plain
-        else:
-            clean_label = str(label_text)
+        clean_label = self._extract_node_identifier(node)
 
         # Create hierarchical path
         current_path = f"{path}/{clean_label}" if path else clean_label
@@ -605,27 +591,27 @@ class MediaDupesApp(App):
 
     def action_collapse_single(self) -> None:
         """Collapse the current node only."""
-        tree = self.query_one("#duplicates-tree", Tree)
-        if tree.cursor_node:
-            tree.cursor_node.collapse()
+        cursor_node = self._get_cursor_node()
+        if cursor_node:
+            cursor_node.collapse()
 
     def action_expand_single(self) -> None:
         """Expand the current node only."""
-        tree = self.query_one("#duplicates-tree", Tree)
-        if tree.cursor_node:
-            tree.cursor_node.expand()
+        cursor_node = self._get_cursor_node()
+        if cursor_node:
+            cursor_node.expand()
 
     def action_collapse_all(self) -> None:
         """Collapse the current node and all its children."""
-        tree = self.query_one("#duplicates-tree", Tree)
-        if tree.cursor_node:
-            tree.cursor_node.collapse_all()
+        cursor_node = self._get_cursor_node()
+        if cursor_node:
+            cursor_node.collapse_all()
 
     def action_expand_all(self) -> None:
         """Expand the current node and all its children."""
-        tree = self.query_one("#duplicates-tree", Tree)
-        if tree.cursor_node:
-            tree.cursor_node.expand_all()
+        cursor_node = self._get_cursor_node()
+        if cursor_node:
+            cursor_node.expand_all()
 
     def action_toggle_filter(self) -> None:
         """Toggle between showing duplicates only and showing all media."""
@@ -660,14 +646,14 @@ class MediaDupesApp(App):
 
     def action_delete_file(self) -> None:
         """Delete the currently selected file."""
-        tree = self.query_one("#duplicates-tree", Tree)
-        if not tree.cursor_node:
+        cursor_node = self._get_cursor_node()
+        if not cursor_node:
             return
 
         # Check if the current node is a leaf (file node)
-        if not tree.cursor_node.allow_expand:
+        if not cursor_node.allow_expand:
             # Try to find the metadata for this file
-            filepath = self._get_filepath_from_node(tree.cursor_node)
+            filepath = self._get_filepath_from_node(cursor_node)
             if filepath:
                 self.push_screen(
                     DeleteConfirmation(filepath), callback=self._handle_delete_result
@@ -689,11 +675,11 @@ class MediaDupesApp(App):
         if not confirmed:
             return
 
-        tree = self.query_one("#duplicates-tree", Tree)
-        if not tree.cursor_node:
+        cursor_node = self._get_cursor_node()
+        if not cursor_node:
             return
 
-        filepath = self._get_filepath_from_node(tree.cursor_node)
+        filepath = self._get_filepath_from_node(cursor_node)
         if not filepath:
             return
 
@@ -716,14 +702,14 @@ class MediaDupesApp(App):
 
     def action_rename_file(self) -> None:
         """Rename the currently selected file."""
-        tree = self.query_one("#duplicates-tree", Tree)
-        if not tree.cursor_node:
+        cursor_node = self._get_cursor_node()
+        if not cursor_node:
             return
 
         # Check if the current node is a leaf (file node)
-        if not tree.cursor_node.allow_expand:
+        if not cursor_node.allow_expand:
             # Try to find the metadata for this file
-            filepath = self._get_filepath_from_node(tree.cursor_node)
+            filepath = self._get_filepath_from_node(cursor_node)
             if filepath:
                 self.push_screen(
                     RenameDialog(filepath.name), callback=self._handle_rename_result
@@ -734,11 +720,11 @@ class MediaDupesApp(App):
         if not new_name:
             return
 
-        tree = self.query_one("#duplicates-tree", Tree)
-        if not tree.cursor_node:
+        cursor_node = self._get_cursor_node()
+        if not cursor_node:
             return
 
-        filepath = self._get_filepath_from_node(tree.cursor_node)
+        filepath = self._get_filepath_from_node(cursor_node)
         if not filepath:
             return
 
