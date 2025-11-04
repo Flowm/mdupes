@@ -303,6 +303,7 @@ class MediaDupesApp(App):
         self.duplicates = find_duplicates(media_list)
         self.show_duplicates_only = False
         self.sort_order = "alpha"  # Default sort order
+        self.expansion_states: dict[str, bool] = {}  # Store expansion states
 
     def compose(self) -> ComposeResult:
         """Create child widgets for the app."""
@@ -317,6 +318,10 @@ class MediaDupesApp(App):
     def _rebuild_tree(self) -> None:
         """Rebuild the entire tree based on current filter state."""
         tree = self.query_one("#duplicates-tree", Tree)
+
+        # Save expansion states before clearing
+        self._save_expansion_states(tree.root)
+
         tree.clear()
         tree.show_root = False
 
@@ -388,6 +393,9 @@ class MediaDupesApp(App):
                 tree.root.add("✅ No duplicates found!")
             else:
                 tree.root.add("📂 No media files found!")
+
+        # Restore expansion states after rebuilding
+        self._restore_expansion_states(tree.root)
 
     def _build_movies_tree(
         self, parent: TreeNode, movies: dict[MediaKey, list[MediaMetadata]]
@@ -509,6 +517,91 @@ class MediaDupesApp(App):
                             f"[cyan]{metadata.filepath.name}[/cyan] "
                             + format_metadata_summary(1, 0, [metadata])
                         )
+
+    def _save_expansion_states(self, node: TreeNode, path: str = "") -> None:
+        """Recursively save the expansion state of all nodes."""
+        if node == node.tree.root:
+            # Clear previous states when starting from root
+            self.expansion_states = {}
+            # Process root's children
+            for child in node.children:
+                self._save_expansion_states(child, "")
+            return
+
+        # Build the path for this node using its label
+        # Extract only the cyan-colored text part for stable identification
+        from rich.text import Text
+
+        label_text = node.label
+        clean_label = ""
+
+        if isinstance(label_text, Text):
+            # Extract text from cyan or bold cyan spans
+            for span in label_text.spans:
+                style_str = str(span.style) if span.style else ""
+                if "cyan" in style_str:
+                    clean_label = label_text.plain[span.start : span.end]
+                    break
+
+            # Fallback to full plain text if no cyan span found
+            if not clean_label:
+                clean_label = label_text.plain
+        else:
+            clean_label = str(label_text)
+
+        # Create hierarchical path
+        current_path = f"{path}/{clean_label}" if path else clean_label
+
+        # Save the expansion state
+        self.expansion_states[current_path] = node.is_expanded
+
+        # Recursively process children
+        for child in node.children:
+            self._save_expansion_states(child, current_path)
+
+    def _restore_expansion_states(self, node: TreeNode, path: str = "") -> None:
+        """Recursively restore the expansion state of all nodes."""
+        if node == node.tree.root:
+            # Process root's children
+            for child in node.children:
+                self._restore_expansion_states(child, "")
+            return
+
+        # Build the path for this node using its label
+        # Extract only the cyan-colored text part for stable identification
+        from rich.text import Text
+
+        label_text = node.label
+        clean_label = ""
+
+        if isinstance(label_text, Text):
+            # Extract text from cyan or bold cyan spans
+            for span in label_text.spans:
+                style_str = str(span.style) if span.style else ""
+                if "cyan" in style_str:
+                    clean_label = label_text.plain[span.start : span.end]
+                    break
+
+            # Fallback to full plain text if no cyan span found
+            if not clean_label:
+                clean_label = label_text.plain
+        else:
+            clean_label = str(label_text)
+
+        # Create hierarchical path
+        current_path = f"{path}/{clean_label}" if path else clean_label
+
+        # Restore the expansion state if we have it saved
+        if current_path in self.expansion_states:
+            saved_state = self.expansion_states[current_path]
+            if saved_state:
+                node.expand()
+            else:
+                node.collapse()
+
+        # Recursively process children
+        for child in node.children:
+            self._restore_expansion_states(child, current_path)
 
     def action_collapse_single(self) -> None:
         """Collapse the current node only."""

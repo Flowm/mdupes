@@ -86,7 +86,7 @@ def main(
         click.echo(ctx.get_help())
         ctx.exit(1)
 
-    click.echo("🔍 mdupes")
+    click.echo("🔍 mdupes - Media Duplicates Finder")
     click.echo("=" * 50)
 
     # Load or scan
