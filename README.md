@@ -90,7 +90,16 @@ python mdupes.py -l results.json
 - `s` - Open sort menu (alphabetic, file count, total size, duplicate count)
 - `d` - Delete selected file (with confirmation)
 - `r` - Rename selected file
+- `m` - Mark/unmark file for deletion
+- `Ctrl+D` - Delete all marked files (with confirmation)
+- `Ctrl+U` - Unmark all files
 - `q` - Quit
+
+**Multi-Select Workflow:**
+1. Navigate to a file and press `m` to mark it (shows ✓)
+2. Mark additional files as needed
+3. Press `Ctrl+D` to delete all marked files at once
+4. Use `Ctrl+U` to clear all marks if needed
 
 ## Example Display
 

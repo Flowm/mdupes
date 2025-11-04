@@ -159,6 +159,98 @@ class DeleteConfirmation(ModalScreen[bool]):
         self.query_one("#delete-btn", Button).focus()
 
 
+class DeleteMultipleConfirmation(ModalScreen[bool]):
+    """Modal screen for confirming deletion of multiple files."""
+
+    CSS = """
+    DeleteMultipleConfirmation {
+        align: center middle;
+    }
+
+    #delete-multiple-dialog {
+        width: 80;
+        height: auto;
+        max-height: 30;
+        border: thick $error 80%;
+        background: $surface;
+        padding: 1 2;
+    }
+
+    #delete-multiple-message {
+        width: 100%;
+        padding: 0 0 1 0;
+    }
+
+    #file-list {
+        width: 100%;
+        height: auto;
+        max-height: 15;
+        overflow-y: auto;
+        background: $panel;
+        padding: 1;
+        margin: 1 0;
+    }
+
+    #button-container {
+        width: 100%;
+        height: auto;
+        align: center middle;
+        padding: 1 0 0 0;
+    }
+
+    Button {
+        margin: 0 1;
+    }
+    """
+
+    BINDINGS = [
+        ("escape", "cancel", "Cancel"),
+        ("left", "focus_cancel", "Focus Cancel"),
+        ("right", "focus_delete", "Focus Delete"),
+    ]
+
+    def __init__(self, filepaths: list[Path]):
+        super().__init__()
+        self.filepaths = filepaths
+
+    def compose(self) -> ComposeResult:
+        file_list = "\n".join(f"  • {fp.name}" for fp in self.filepaths)
+        count = len(self.filepaths)
+
+        with Vertical(id="delete-multiple-dialog"):
+            yield Label(
+                f"Delete {count} file(s)?\n\nThis cannot be undone!",
+                id="delete-multiple-message",
+            )
+            yield Label(file_list, id="file-list")
+            with Horizontal(id="button-container"):
+                yield Button("Cancel", variant="default", id="cancel-btn")
+                yield Button(f"Delete {count}", variant="error", id="delete-btn")
+
+    def on_button_pressed(self, event: Button.Pressed) -> None:
+        """Handle button press."""
+        if event.button.id == "delete-btn":
+            self.dismiss(True)
+        else:
+            self.dismiss(False)
+
+    def on_mount(self) -> None:
+        """Set initial focus on Cancel button when modal opens."""
+        self.query_one("#cancel-btn", Button).focus()
+
+    def action_cancel(self) -> None:
+        """Cancel deletion."""
+        self.dismiss(False)
+
+    def action_focus_cancel(self) -> None:
+        """Focus the Cancel button."""
+        self.query_one("#cancel-btn", Button).focus()
+
+    def action_focus_delete(self) -> None:
+        """Focus the Delete button."""
+        self.query_one("#delete-btn", Button).focus()
+
+
 class RenameDialog(ModalScreen[str | None]):
     """Modal screen for renaming a file."""
 
@@ -310,6 +402,9 @@ class MediaDupesApp(App):
         ("r", "rename_file", "Rename File"),
         ("left", "collapse_single", "Collapse"),
         ("right", "expand_single", "Expand"),
+        ("m", "toggle_mark", "Mark/Unmark"),
+        ("ctrl+d", "delete_marked", "Delete Marked"),
+        ("ctrl+u", "unmark_all", "Unmark All"),
     ]
 
     def __init__(self, media_list: list[MediaMetadata]):
@@ -319,6 +414,7 @@ class MediaDupesApp(App):
         self.show_duplicates_only = False
         self.sort_order = "alpha"  # Default sort order
         self.expansion_states: dict[str, bool] = {}  # Store expansion states
+        self.selected_files: set[Path] = set()  # Store selected files for deletion
 
     def compose(self) -> ComposeResult:
         """Create child widgets for the app."""
@@ -439,8 +535,10 @@ class MediaDupesApp(App):
             )
 
             for metadata in sorted(metadata_list, key=lambda m: m.filepath):
+                # Add checkmark if file is selected
+                mark = "✓ " if metadata.filepath in self.selected_files else ""
                 title_node.add_leaf(
-                    f"[cyan]{metadata.filepath.name}[/cyan] "
+                    f"{mark}[cyan]{metadata.filepath.name}[/cyan] "
                     + format_metadata_summary(1, 0, [metadata])
                 )
 
@@ -528,8 +626,10 @@ class MediaDupesApp(App):
                     )
 
                     for metadata in sorted(metadata_list, key=lambda m: m.filepath):
+                        # Add checkmark if file is selected
+                        mark = "✓ " if metadata.filepath in self.selected_files else ""
                         episode_node.add_leaf(
-                            f"[cyan]{metadata.filepath.name}[/cyan] "
+                            f"{mark}[cyan]{metadata.filepath.name}[/cyan] "
                             + format_metadata_summary(1, 0, [metadata])
                         )
 
@@ -677,12 +777,90 @@ class MediaDupesApp(App):
         """Extract the filepath from a file node by matching against metadata."""
         label = str(node.label)
         # Extract just the filename from the label (before the first space/paren)
-        # The label format is: "[cyan]filename[/cyan] ..."
+        # The label format is: "[cyan]filename[/cyan] ..." or "✓ [cyan]filename[/cyan] ..."
         # We need to search through our metadata to find a match
         for metadata in self.media_list:
             if metadata.filepath.name in label:
                 return metadata.filepath
         return None
+
+    def action_toggle_mark(self) -> None:
+        """Toggle the mark on the currently selected file."""
+        cursor_node = self._get_cursor_node()
+        if not cursor_node or cursor_node.allow_expand:
+            return
+
+        filepath = self._get_filepath_from_node(cursor_node)
+        if not filepath:
+            return
+
+        # Toggle selection
+        if filepath in self.selected_files:
+            self.selected_files.remove(filepath)
+            self.sub_title = f"Unmarked: {filepath.name}"
+        else:
+            self.selected_files.add(filepath)
+            self.sub_title = (
+                f"Marked: {filepath.name} ({len(self.selected_files)} total)"
+            )
+
+        # Rebuild tree to show/hide checkmarks
+        self._rebuild_tree()
+
+    def action_unmark_all(self) -> None:
+        """Unmark all selected files."""
+        count = len(self.selected_files)
+        self.selected_files.clear()
+        self.sub_title = f"Unmarked {count} file(s)"
+        self._rebuild_tree()
+
+    def action_delete_marked(self) -> None:
+        """Delete all marked files."""
+        if not self.selected_files:
+            self.sub_title = "No files marked for deletion"
+            return
+
+        # Show confirmation dialog with all files
+        files_list = sorted(self.selected_files)
+        self.push_screen(
+            DeleteMultipleConfirmation(files_list),
+            callback=lambda confirmed: self._handle_delete_marked_result(
+                confirmed, files_list
+            ),
+        )
+
+    def _handle_delete_marked_result(
+        self, confirmed: bool, files_to_delete: list[Path]
+    ) -> None:
+        """Handle the deletion confirmation result for marked files."""
+        if not confirmed:
+            return
+
+        deleted = []
+        errors = []
+
+        for filepath in files_to_delete:
+            try:
+                filepath.unlink()
+                deleted.append(filepath)
+            except Exception as e:
+                errors.append((filepath, e))
+
+        # Update data structures
+        if deleted:
+            self.media_list = [m for m in self.media_list if m.filepath not in deleted]
+            self.duplicates = find_duplicates(self.media_list)
+            self.selected_files.clear()
+            self._rebuild_tree()
+
+        # Show results
+        if errors:
+            error_names = ", ".join(fp.name for fp, _ in errors[:3])
+            self.sub_title = (
+                f"Deleted {len(deleted)}, errors: {len(errors)} ({error_names}...)"
+            )
+        else:
+            self.sub_title = f"Successfully deleted {len(deleted)} file(s)"
 
     def _handle_delete_result(self, confirmed: bool) -> None:
         """Handle the deletion confirmation result."""
