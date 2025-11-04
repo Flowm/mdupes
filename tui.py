@@ -117,6 +117,8 @@ class DeleteConfirmation(ModalScreen[bool]):
 
     BINDINGS = [
         ("escape", "cancel", "Cancel"),
+        ("left", "focus_cancel", "Focus Cancel"),
+        ("right", "focus_delete", "Focus Delete"),
     ]
 
     def __init__(self, filepath: Path):
@@ -140,9 +142,21 @@ class DeleteConfirmation(ModalScreen[bool]):
         else:
             self.dismiss(False)
 
+    def on_mount(self) -> None:
+        """Set initial focus on Cancel button when modal opens."""
+        self.query_one("#cancel-btn", Button).focus()
+
     def action_cancel(self) -> None:
         """Cancel deletion."""
         self.dismiss(False)
+
+    def action_focus_cancel(self) -> None:
+        """Focus the Cancel button."""
+        self.query_one("#cancel-btn", Button).focus()
+
+    def action_focus_delete(self) -> None:
+        """Focus the Delete button."""
+        self.query_one("#delete-btn", Button).focus()
 
 
 class RenameDialog(ModalScreen[str | None]):
