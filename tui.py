@@ -5,12 +5,13 @@ Built with Textual framework for an interactive ncdu-style tree view.
 """
 
 from collections import defaultdict
+from pathlib import Path
 from textual.app import App, ComposeResult
-from textual.widgets import Tree, Header, Footer, OptionList
+from textual.widgets import Tree, Header, Footer, OptionList, Label, Button, Input
 from textual.widgets.tree import TreeNode
 from textual.widgets.option_list import Option
 from textual.screen import ModalScreen
-from textual.containers import Container
+from textual.containers import Container, Vertical, Horizontal
 
 from scanner import MediaKey, MediaMetadata, find_duplicates
 
@@ -80,6 +81,154 @@ def format_metadata_summary(
     return f"[dim]({total_files} {file_text}, {size_str})[/dim]{quality_str}{duplicates_suffix}"
 
 
+class DeleteConfirmation(ModalScreen[bool]):
+    """Modal screen for confirming file deletion."""
+
+    CSS = """
+    DeleteConfirmation {
+        align: center middle;
+    }
+
+    #delete-dialog {
+        width: 70;
+        height: auto;
+        border: thick $error 80%;
+        background: $surface;
+        padding: 1 2;
+    }
+
+    #delete-message {
+        width: 100%;
+        content-align: center middle;
+        padding: 1 0;
+    }
+
+    #button-container {
+        width: 100%;
+        height: auto;
+        align: center middle;
+    }
+
+    Button {
+        margin: 0 1;
+    }
+    """
+
+    BINDINGS = [
+        ("escape", "cancel", "Cancel"),
+    ]
+
+    def __init__(self, filepath: Path):
+        super().__init__()
+        self.filepath = filepath
+
+    def compose(self) -> ComposeResult:
+        with Vertical(id="delete-dialog"):
+            yield Label(
+                f"Delete file?\n\n{self.filepath.name}\n\nThis cannot be undone!",
+                id="delete-message",
+            )
+            with Horizontal(id="button-container"):
+                yield Button("Cancel", variant="default", id="cancel-btn")
+                yield Button("Delete", variant="error", id="delete-btn")
+
+    def on_button_pressed(self, event: Button.Pressed) -> None:
+        """Handle button press."""
+        if event.button.id == "delete-btn":
+            self.dismiss(True)
+        else:
+            self.dismiss(False)
+
+    def action_cancel(self) -> None:
+        """Cancel deletion."""
+        self.dismiss(False)
+
+
+class RenameDialog(ModalScreen[str | None]):
+    """Modal screen for renaming a file."""
+
+    CSS = """
+    RenameDialog {
+        align: center middle;
+    }
+
+    #rename-dialog {
+        width: 70;
+        height: auto;
+        border: thick $primary 80%;
+        background: $surface;
+        padding: 1 2;
+    }
+
+    #rename-message {
+        width: 100%;
+        padding: 0 0 1 0;
+    }
+
+    #rename-input {
+        width: 100%;
+        margin: 1 0;
+    }
+
+    #button-container {
+        width: 100%;
+        height: auto;
+        align: center middle;
+        padding: 1 0 0 0;
+    }
+
+    Button {
+        margin: 0 1;
+    }
+    """
+
+    BINDINGS = [
+        ("escape", "cancel", "Cancel"),
+    ]
+
+    def __init__(self, current_name: str):
+        super().__init__()
+        self.current_name = current_name
+
+    def compose(self) -> ComposeResult:
+        with Vertical(id="rename-dialog"):
+            yield Label("Rename file:", id="rename-message")
+            yield Input(
+                value=self.current_name,
+                placeholder="Enter new filename",
+                id="rename-input",
+            )
+            with Horizontal(id="button-container"):
+                yield Button("Cancel", variant="default", id="cancel-btn")
+                yield Button("Rename", variant="primary", id="rename-btn")
+
+    def on_mount(self) -> None:
+        """Focus the input when mounted."""
+        self.query_one("#rename-input", Input).focus()
+
+    def on_button_pressed(self, event: Button.Pressed) -> None:
+        """Handle button press."""
+        if event.button.id == "rename-btn":
+            new_name = self.query_one("#rename-input", Input).value
+            if new_name and new_name != self.current_name:
+                self.dismiss(new_name)
+            else:
+                self.dismiss(None)
+        else:
+            self.dismiss(None)
+
+    def on_input_submitted(self, event: Input.Submitted) -> None:
+        """Handle Enter key in input."""
+        if event.value and event.value != self.current_name:
+            self.dismiss(event.value)
+        else:
+            self.dismiss(None)
+
+    def action_cancel(self) -> None:
+        """Cancel rename."""
+        self.dismiss(None)
+
+
 class SortPrompt(ModalScreen[str]):
     """Modal screen for selecting sort order."""
 
@@ -142,6 +291,8 @@ class MediaDupesApp(App):
         ("e", "expand_all", "Expand All"),
         ("f", "toggle_filter", "Toggle Filter"),
         ("s", "sort", "Sort"),
+        ("d", "delete_file", "Delete File"),
+        ("r", "rename_file", "Rename File"),
         ("left", "collapse_single", "Collapse"),
         ("right", "expand_single", "Expand"),
     ]
@@ -413,3 +564,117 @@ class MediaDupesApp(App):
         elif self.sort_order == "duplicates":
             return sorted(items.keys(), key=lambda k: len(items[k]) - 1, reverse=True)
         return sorted(items.keys())
+
+    def action_delete_file(self) -> None:
+        """Delete the currently selected file."""
+        tree = self.query_one("#duplicates-tree", Tree)
+        if not tree.cursor_node:
+            return
+
+        # Check if the current node is a leaf (file node)
+        if not tree.cursor_node.allow_expand:
+            # Try to find the metadata for this file
+            filepath = self._get_filepath_from_node(tree.cursor_node)
+            if filepath:
+                self.push_screen(
+                    DeleteConfirmation(filepath), callback=self._handle_delete_result
+                )
+
+    def _get_filepath_from_node(self, node: TreeNode) -> Path | None:
+        """Extract the filepath from a file node by matching against metadata."""
+        label = str(node.label)
+        # Extract just the filename from the label (before the first space/paren)
+        # The label format is: "[cyan]filename[/cyan] ..."
+        # We need to search through our metadata to find a match
+        for metadata in self.media_list:
+            if metadata.filepath.name in label:
+                return metadata.filepath
+        return None
+
+    def _handle_delete_result(self, confirmed: bool) -> None:
+        """Handle the deletion confirmation result."""
+        if not confirmed:
+            return
+
+        tree = self.query_one("#duplicates-tree", Tree)
+        if not tree.cursor_node:
+            return
+
+        filepath = self._get_filepath_from_node(tree.cursor_node)
+        if not filepath:
+            return
+
+        try:
+            # Delete the file
+            filepath.unlink()
+
+            # Remove from our data
+            self.media_list = [m for m in self.media_list if m.filepath != filepath]
+            self.duplicates = find_duplicates(self.media_list)
+
+            # Rebuild the tree
+            self._rebuild_tree()
+
+            # Show success message in the subtitle
+            self.sub_title = f"Deleted: {filepath.name}"
+        except Exception as e:
+            # Show error message in the subtitle
+            self.sub_title = f"Error deleting file: {e}"
+
+    def action_rename_file(self) -> None:
+        """Rename the currently selected file."""
+        tree = self.query_one("#duplicates-tree", Tree)
+        if not tree.cursor_node:
+            return
+
+        # Check if the current node is a leaf (file node)
+        if not tree.cursor_node.allow_expand:
+            # Try to find the metadata for this file
+            filepath = self._get_filepath_from_node(tree.cursor_node)
+            if filepath:
+                self.push_screen(
+                    RenameDialog(filepath.name), callback=self._handle_rename_result
+                )
+
+    def _handle_rename_result(self, new_name: str | None) -> None:
+        """Handle the rename dialog result."""
+        if not new_name:
+            return
+
+        tree = self.query_one("#duplicates-tree", Tree)
+        if not tree.cursor_node:
+            return
+
+        filepath = self._get_filepath_from_node(tree.cursor_node)
+        if not filepath:
+            return
+
+        # Create new path with the new name
+        new_filepath = filepath.parent / new_name
+
+        # Check if target already exists
+        if new_filepath.exists():
+            self.sub_title = f"Error: File already exists: {new_name}"
+            return
+
+        try:
+            # Rename the file
+            filepath.rename(new_filepath)
+
+            # Update in our data
+            for metadata in self.media_list:
+                if metadata.filepath == filepath:
+                    metadata.filepath = new_filepath
+                    break
+
+            # Recalculate duplicates
+            self.duplicates = find_duplicates(self.media_list)
+
+            # Rebuild the tree
+            self._rebuild_tree()
+
+            # Show success message in the subtitle
+            self.sub_title = f"Renamed to: {new_name}"
+        except Exception as e:
+            # Show error message in the subtitle
+            self.sub_title = f"Error renaming file: {e}"
