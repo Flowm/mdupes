@@ -10,11 +10,11 @@ from pathlib import Path
 
 from rich.text import Text
 from textual.app import App, ComposeResult
-from textual.widgets import Tree, Header, Footer, OptionList, Label, Button, Input
+from textual.widgets import Tree, Header, Footer, OptionList, Label, Button, Input, Static
 from textual.widgets.tree import TreeNode
 from textual.widgets.option_list import Option
 from textual.screen import ModalScreen
-from textual.containers import Container, Vertical, Horizontal
+from textual.containers import Container, Vertical, Horizontal, VerticalScroll
 
 from scanner import MediaKey, MediaMetadata, find_duplicates
 
@@ -119,6 +119,12 @@ class DeleteConfirmation(ModalScreen[bool]):
         ("escape", "cancel", "Cancel"),
         ("left", "focus_cancel", "Focus Cancel"),
         ("right", "focus_delete", "Focus Delete"),
+        ("up", "scroll_up", "Scroll Up"),
+        ("down", "scroll_down", "Scroll Down"),
+        ("pageup", "page_up", "Page Up"),
+        ("pagedown", "page_down", "Page Down"),
+        ("home", "scroll_top", "Top"),
+        ("end", "scroll_bottom", "Bottom"),
     ]
 
     def __init__(self, filepath: Path):
@@ -183,12 +189,15 @@ class DeleteMultipleConfirmation(ModalScreen[bool]):
 
     #file-list {
         width: 100%;
-        height: auto;
+        height: 15;
         max-height: 15;
-        overflow-y: auto;
         background: $panel;
         padding: 1;
         margin: 1 0;
+    }
+
+    #file-list-content {
+        width: 100%;
     }
 
     #button-container {
@@ -222,7 +231,8 @@ class DeleteMultipleConfirmation(ModalScreen[bool]):
                 f"Delete {count} file(s)?\n\nThis cannot be undone!",
                 id="delete-multiple-message",
             )
-            yield Label(file_list, id="file-list")
+            with VerticalScroll(id="file-list"):
+                yield Static(file_list, id="file-list-content")
             with Horizontal(id="button-container"):
                 yield Button("Cancel", variant="default", id="cancel-btn")
                 yield Button(f"Delete {count}", variant="error", id="delete-btn")
@@ -249,6 +259,30 @@ class DeleteMultipleConfirmation(ModalScreen[bool]):
     def action_focus_delete(self) -> None:
         """Focus the Delete button."""
         self.query_one("#delete-btn", Button).focus()
+
+    def action_scroll_up(self) -> None:
+        """Scroll the file list up by one line."""
+        self.query_one("#file-list", VerticalScroll).scroll_up(animate=False)
+
+    def action_scroll_down(self) -> None:
+        """Scroll the file list down by one line."""
+        self.query_one("#file-list", VerticalScroll).scroll_down(animate=False)
+
+    def action_page_up(self) -> None:
+        """Scroll the file list up by one page."""
+        self.query_one("#file-list", VerticalScroll).scroll_page_up(animate=False)
+
+    def action_page_down(self) -> None:
+        """Scroll the file list down by one page."""
+        self.query_one("#file-list", VerticalScroll).scroll_page_down(animate=False)
+
+    def action_scroll_top(self) -> None:
+        """Scroll the file list to the start."""
+        self.query_one("#file-list", VerticalScroll).scroll_home(animate=False)
+
+    def action_scroll_bottom(self) -> None:
+        """Scroll the file list to the end."""
+        self.query_one("#file-list", VerticalScroll).scroll_end(animate=False)
 
 
 class RenameDialog(ModalScreen[str | None]):
@@ -415,6 +449,7 @@ class MediaDupesApp(App):
         self.sort_order = "alpha"  # Default sort order
         self.expansion_states: dict[str, bool] = {}  # Store expansion states
         self.selected_files: set[Path] = set()  # Store selected files for deletion
+        self.file_nodes: dict[Path, TreeNode] = {}
 
     def compose(self) -> ComposeResult:
         """Create child widgets for the app."""
@@ -435,6 +470,7 @@ class MediaDupesApp(App):
 
         tree.clear()
         tree.show_root = False
+        self.file_nodes = {}
 
         # Choose data source based on filter state
         data_source = self.duplicates if self.show_duplicates_only else self.media_list
@@ -535,12 +571,7 @@ class MediaDupesApp(App):
             )
 
             for metadata in sorted(metadata_list, key=lambda m: m.filepath):
-                # Add checkmark if file is selected
-                mark = "✓ " if metadata.filepath in self.selected_files else ""
-                title_node.add_leaf(
-                    f"{mark}[cyan]{metadata.filepath.name}[/cyan] "
-                    + format_metadata_summary(1, 0, [metadata])
-                )
+                self._add_file_leaf(title_node, metadata)
 
     def _build_series_tree(
         self, parent: TreeNode, series: dict[MediaKey, list[MediaMetadata]]
@@ -626,12 +657,30 @@ class MediaDupesApp(App):
                     )
 
                     for metadata in sorted(metadata_list, key=lambda m: m.filepath):
-                        # Add checkmark if file is selected
-                        mark = "✓ " if metadata.filepath in self.selected_files else ""
-                        episode_node.add_leaf(
-                            f"{mark}[cyan]{metadata.filepath.name}[/cyan] "
-                            + format_metadata_summary(1, 0, [metadata])
-                        )
+                        self._add_file_leaf(episode_node, metadata)
+
+    def _format_file_label(self, metadata: MediaMetadata) -> str:
+        """Format a file node label, including its marked state."""
+        mark = "✓ " if metadata.filepath in self.selected_files else ""
+        return (
+            f"{mark}[cyan]{metadata.filepath.name}[/cyan] "
+            + format_metadata_summary(1, 0, [metadata])
+        )
+
+    def _add_file_leaf(self, parent: TreeNode, metadata: MediaMetadata) -> None:
+        """Add a file leaf and keep a direct reference for fast updates."""
+        node = parent.add_leaf(self._format_file_label(metadata), data=metadata)
+        self.file_nodes[metadata.filepath] = node
+
+    def _refresh_file_node_label(self, filepath: Path) -> None:
+        """Refresh the label of a single file node without rebuilding the tree."""
+        node = self.file_nodes.get(filepath)
+        if not node:
+            return
+
+        metadata = getattr(node, "data", None)
+        if isinstance(metadata, MediaMetadata):
+            node.set_label(self._format_file_label(metadata))
 
     def _get_cursor_node(self) -> TreeNode | None:
         """Get the current cursor node from the tree, or None if not available."""
@@ -774,14 +823,10 @@ class MediaDupesApp(App):
                 )
 
     def _get_filepath_from_node(self, node: TreeNode) -> Path | None:
-        """Extract the filepath from a file node by matching against metadata."""
-        label = str(node.label)
-        # Extract just the filename from the label (before the first space/paren)
-        # The label format is: "[cyan]filename[/cyan] ..." or "✓ [cyan]filename[/cyan] ..."
-        # We need to search through our metadata to find a match
-        for metadata in self.media_list:
-            if metadata.filepath.name in label:
-                return metadata.filepath
+        """Extract the filepath from a file node's attached metadata."""
+        metadata = getattr(node, "data", None)
+        if isinstance(metadata, MediaMetadata):
+            return metadata.filepath
         return None
 
     def action_toggle_mark(self) -> None:
@@ -804,15 +849,16 @@ class MediaDupesApp(App):
                 f"Marked: {filepath.name} ({len(self.selected_files)} total)"
             )
 
-        # Rebuild tree to show/hide checkmarks
-        self._rebuild_tree()
+        self._refresh_file_node_label(filepath)
 
     def action_unmark_all(self) -> None:
         """Unmark all selected files."""
         count = len(self.selected_files)
+        marked_files = list(self.selected_files)
         self.selected_files.clear()
         self.sub_title = f"Unmarked {count} file(s)"
-        self._rebuild_tree()
+        for filepath in marked_files:
+            self._refresh_file_node_label(filepath)
 
     def action_delete_marked(self) -> None:
         """Delete all marked files."""
