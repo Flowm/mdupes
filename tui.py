@@ -174,7 +174,7 @@ class DeleteMultipleConfirmation(ModalScreen[bool]):
     }
 
     #delete-multiple-dialog {
-        width: 80;
+        width: 120;
         height: auto;
         max-height: 30;
         border: thick $error 80%;
@@ -283,6 +283,73 @@ class DeleteMultipleConfirmation(ModalScreen[bool]):
     def action_scroll_bottom(self) -> None:
         """Scroll the file list to the end."""
         self.query_one("#file-list", VerticalScroll).scroll_end(animate=False)
+
+
+class MarkCriteriaPrompt(ModalScreen[list[Path] | None]):
+    """Modal screen for selecting a bulk mark criterion."""
+
+    CSS = """
+    MarkCriteriaPrompt {
+        align: center middle;
+    }
+
+    #delete-criteria-dialog {
+        width: 70;
+        height: auto;
+        max-height: 24;
+        border: thick $warning 80%;
+        background: $surface;
+        padding: 1 2;
+    }
+
+    #mark-criteria-message {
+        width: 100%;
+        padding: 0 0 1 0;
+    }
+
+    OptionList {
+        height: auto;
+        max-height: 12;
+    }
+
+    Button {
+        margin: 1 1 0 1;
+    }
+    """
+
+    BINDINGS = [("escape", "cancel", "Cancel")]
+
+    def __init__(self, criteria: list[tuple[str, list[Path]]]):
+        super().__init__()
+        self.criteria = criteria
+
+    def compose(self) -> ComposeResult:
+        with Vertical(id="delete-criteria-dialog"):
+            yield Label(
+                "Mark files matching which criterion?",
+                id="mark-criteria-message",
+            )
+            yield OptionList(
+                *[
+                    Option(label, id=str(index))
+                    for index, (label, _filepaths) in enumerate(self.criteria)
+                ]
+            )
+            yield Button("Cancel", variant="default", id="cancel-btn")
+
+    def on_option_list_option_selected(self, event: OptionList.OptionSelected) -> None:
+        """Return the files associated with the selected criterion."""
+        criterion = self.criteria[int(event.option.id)]
+        self.dismiss(criterion[1])
+
+    def on_button_pressed(self, event: Button.Pressed) -> None:
+        """Handle button press."""
+        if event.button.id == "cancel-btn":
+            self.dismiss(None)
+
+    def action_cancel(self) -> None:
+        """Cancel criterion selection."""
+        self.dismiss(None)
 
 
 class RenameDialog(ModalScreen[str | None]):
@@ -808,19 +875,30 @@ class MediaDupesApp(App):
         return sorted(items.keys())
 
     def action_delete_file(self) -> None:
-        """Delete the currently selected file."""
+        """Delete the current file or mark a matching group within the selected node."""
         cursor_node = self._get_cursor_node()
         if not cursor_node:
             return
 
-        # Check if the current node is a leaf (file node)
         if not cursor_node.allow_expand:
-            # Try to find the metadata for this file
             filepath = self._get_filepath_from_node(cursor_node)
             if filepath:
                 self.push_screen(
                     DeleteConfirmation(filepath), callback=self._handle_delete_result
                 )
+            return
+
+        metadata_list = self._collect_descendant_metadata(cursor_node)
+        criteria = self._build_mark_criteria(metadata_list)
+
+        if not criteria:
+            self.sub_title = "No resolution or encoding groups available here"
+            return
+
+        self.push_screen(
+            MarkCriteriaPrompt(criteria),
+            callback=self._handle_mark_criteria_result,
+        )
 
     def _get_filepath_from_node(self, node: TreeNode) -> Path | None:
         """Extract the filepath from a file node's attached metadata."""
@@ -828,6 +906,61 @@ class MediaDupesApp(App):
         if isinstance(metadata, MediaMetadata):
             return metadata.filepath
         return None
+
+    def _collect_descendant_metadata(self, node: TreeNode) -> list[MediaMetadata]:
+        """Collect all file metadata below a tree node."""
+        metadata_list = []
+
+        for child in node.children:
+            metadata = getattr(child, "data", None)
+            if isinstance(metadata, MediaMetadata):
+                metadata_list.append(metadata)
+            elif child.allow_expand:
+                metadata_list.extend(self._collect_descendant_metadata(child))
+
+        return metadata_list
+
+    def _build_mark_criteria(
+        self, metadata_list: list[MediaMetadata]
+    ) -> list[tuple[str, list[Path]]]:
+        """Build bulk mark options from resolution, encoding, and release group metadata."""
+        resolutions: dict[str, list[Path]] = defaultdict(list)
+        encodings: dict[str, list[Path]] = defaultdict(list)
+        release_groups: dict[str, list[Path]] = defaultdict(list)
+
+        for metadata in metadata_list:
+            if metadata.screen_size:
+                resolutions[metadata.screen_size].append(metadata.filepath)
+            if metadata.video_codec:
+                encodings[metadata.video_codec].append(metadata.filepath)
+            release_group = metadata.release_group
+            if not release_group and "-" in metadata.filepath.stem:
+                release_group = metadata.filepath.stem.rsplit("-", 1)[1]
+            if release_group:
+                release_groups[release_group].append(metadata.filepath)
+
+        criteria = []
+
+        for resolution in sort_resolutions(set(resolutions.keys())):
+            files = sorted(resolutions[resolution])
+            criteria.append(
+                (f"Resolution: {resolution} ({len(files)} file(s))", files)
+            )
+
+        for encoding in sorted(encodings.keys()):
+            files = sorted(encodings[encoding])
+            criteria.append((f"Encoding: {encoding} ({len(files)} file(s))", files))
+
+        for release_group in sorted(release_groups.keys()):
+            files = sorted(release_groups[release_group])
+            criteria.append(
+                (
+                    f"Release group: {release_group} ({len(files)} file(s))",
+                    files,
+                )
+            )
+
+        return criteria
 
     def action_toggle_mark(self) -> None:
         """Toggle the mark on the currently selected file."""
@@ -882,6 +1015,35 @@ class MediaDupesApp(App):
         if not confirmed:
             return
 
+        self._delete_files(files_to_delete)
+
+    def _handle_mark_criteria_result(self, files_to_mark: list[Path] | None) -> None:
+        """Mark files for review based on a selected resolution or encoding group."""
+        if not files_to_mark:
+            return
+
+        newly_marked = 0
+
+        for filepath in files_to_mark:
+            if filepath not in self.selected_files:
+                newly_marked += 1
+            self.selected_files.add(filepath)
+            self._refresh_file_node_label(filepath)
+
+        total_marked = len(self.selected_files)
+        already_marked = len(files_to_mark) - newly_marked
+        if already_marked:
+            self.sub_title = (
+                f"Marked {newly_marked} new file(s), {already_marked} already marked; "
+                f"{total_marked} total marked"
+            )
+        else:
+            self.sub_title = f"Marked {newly_marked} file(s); {total_marked} total marked"
+
+    def _delete_files(
+        self, files_to_delete: list[Path]
+    ) -> tuple[list[Path], list[tuple[Path, Exception]]]:
+        """Delete multiple files and refresh the UI state."""
         deleted = []
         errors = []
 
@@ -892,21 +1054,23 @@ class MediaDupesApp(App):
             except Exception as e:
                 errors.append((filepath, e))
 
-        # Update data structures
         if deleted:
-            self.media_list = [m for m in self.media_list if m.filepath not in deleted]
+            deleted_set = set(deleted)
+            self.media_list = [m for m in self.media_list if m.filepath not in deleted_set]
+            self.selected_files.difference_update(deleted_set)
             self.duplicates = find_duplicates(self.media_list)
-            self.selected_files.clear()
             self._rebuild_tree()
 
-        # Show results
         if errors:
             error_names = ", ".join(fp.name for fp, _ in errors[:3])
+            suffix = "..." if len(errors) > 3 else ""
             self.sub_title = (
-                f"Deleted {len(deleted)}, errors: {len(errors)} ({error_names}...)"
+                f"Deleted {len(deleted)}, errors: {len(errors)} ({error_names}{suffix})"
             )
         else:
             self.sub_title = f"Successfully deleted {len(deleted)} file(s)"
+
+        return deleted, errors
 
     def _handle_delete_result(self, confirmed: bool) -> None:
         """Handle the deletion confirmation result."""
@@ -922,18 +1086,11 @@ class MediaDupesApp(App):
             return
 
         try:
-            # Delete the file
-            filepath.unlink()
-
-            # Remove from our data
-            self.media_list = [m for m in self.media_list if m.filepath != filepath]
-            self.duplicates = find_duplicates(self.media_list)
-
-            # Rebuild the tree
-            self._rebuild_tree()
-
-            # Show success message in the subtitle
-            self.sub_title = f"Deleted: {filepath.name}"
+            deleted, errors = self._delete_files([filepath])
+            if errors:
+                return
+            if deleted:
+                self.sub_title = f"Deleted: {filepath.name}"
         except Exception as e:
             # Show error message in the subtitle
             self.sub_title = f"Error deleting file: {e}"
